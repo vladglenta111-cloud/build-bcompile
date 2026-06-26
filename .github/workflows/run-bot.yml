@@ -22,7 +22,7 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: pip install -r bot/requirements.txt
+        run: pip install -r requirements.txt
 
       - name: Run bot
         env:
@@ -32,4 +32,4 @@ jobs:
           GH_WORKFLOW:  compile.yml
           POLL_INTERVAL: "15"
           MAX_WAIT:     "300"
-        run: python bot/bot.py
+        run: python bot.py

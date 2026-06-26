@@ -1,0 +1,35 @@
+name: Run Telegram Bot
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+    paths:
+      - 'bot/**'
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r bot/requirements.txt
+
+      - name: Run bot
+        env:
+          BOT_TOKEN:    ${{ secrets.BOT_TOKEN }}
+          GH_TOKEN:     ${{ secrets.GH_TOKEN }}
+          GH_REPO:      ${{ github.repository }}
+          GH_WORKFLOW:  compile.yml
+          POLL_INTERVAL: "15"
+          MAX_WAIT:     "300"
+        run: python bot/bot.py

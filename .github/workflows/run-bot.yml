@@ -27,7 +27,7 @@ jobs:
       - name: Run bot
         env:
           BOT_TOKEN:    ${{ secrets.BOT_TOKEN }}
-          GH_TOKEN:     ${{ secrets.GH_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO:      ${{ github.repository }}
           GH_WORKFLOW:  compile.yml
           POLL_INTERVAL: "15"

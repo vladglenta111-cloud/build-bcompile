@@ -168,6 +168,9 @@ async def on_file(msg: Message, state: FSMContext):
         await status_msg.edit_text("❌ Не удалось загрузить файл в GitHub.\nПроверь GH_TOKEN — нужны права `repo` + `workflow`.")
         return
 
+    # Ждём чтобы GitHub точно увидел загруженный файл
+    await asyncio.sleep(10)
+
     # Триггерим compile.yml
     run_id = await trigger_workflow(ndk, gh_path, msg.from_user.id)
 

@@ -157,7 +157,7 @@ async def on_file(msg: Message, state: FSMContext):
         await status_msg.edit_text("❌ Не удалось скачать файл.")
         return
 
-    await status_msg.edit_text("⏳ Загружаю в GitHub и запускаю сборку...")
+    await status_msg.edit_text("⏳ Загружаю и запускаю сборку...")
 
     # Загружаем zip в репо как файл sources/upload.zip
     gh_path = f"sources/upload_{msg.from_user.id}.zip"
@@ -165,10 +165,10 @@ async def on_file(msg: Message, state: FSMContext):
     tmp_path.unlink(missing_ok=True)
 
     if not uploaded:
-        await status_msg.edit_text("❌ Не удалось загрузить файл в GitHub.\nПроверь GH_TOKEN — нужны права `repo` + `workflow`.")
+        await status_msg.edit_text("❌ Не удалось загрузить файл. Попробуй ещё раз.")
         return
 
-    # Ждём чтобы GitHub точно увидел загруженный файл
+    # Небольшая задержка перед запуском
     await asyncio.sleep(10)
 
     # Триггерим compile.yml
@@ -180,8 +180,7 @@ async def on_file(msg: Message, state: FSMContext):
 
     await status_msg.edit_text(
         f"🔨 Сборка запущена! NDK: *{ndk}*\n"
-        f"⏳ Жди 2-3 минуты...\n\n"
-        f"🔗 [Логи](https://github.com/{GH_REPO}/actions/runs/{run_id})",
+        f"⏳ Жди 2-3 минуты...",
         parse_mode="Markdown",
         disable_web_page_preview=True
     )
@@ -285,7 +284,7 @@ async def poll_and_send(chat_id: int, run_id: str, ndk: str, gh_path: str, statu
                 chat_id=chat_id, message_id=status_msg_id,
                 text=(
                     f"❌ *Сборка провалилась!*\n"
-                    f"🔗 [Смотреть логи](https://github.com/{GH_REPO}/actions/runs/{run_id})"
+                    f"Проверь исходники и попробуй снова."
                 ),
                 parse_mode="Markdown",
                 disable_web_page_preview=True
@@ -294,7 +293,7 @@ async def poll_and_send(chat_id: int, run_id: str, ndk: str, gh_path: str, statu
 
     await bot.edit_message_text(
         chat_id=chat_id, message_id=status_msg_id,
-        text=f"⏰ Таймаут! Сборка заняла больше {MAX_WAIT//60} мин.\n🔗 [Логи](https://github.com/{GH_REPO}/actions/runs/{run_id})",
+        text="⏰ Таймаут! Сборка заняла слишком долго. Попробуй снова.",
         parse_mode="Markdown",
         disable_web_page_preview=True
     )

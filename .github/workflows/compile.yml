@@ -4,14 +4,14 @@ on:
   workflow_dispatch:
     inputs:
       ndk_version:
-        description: "NDK version (e.g. r25c)"
+        description: "NDK version"
         required: true
         default: "r25c"
       user_id:
         description: "Telegram user ID"
         required: true
-      sources_b64:
-        description: "Base64-encoded ZIP with sources"
+      zip_path:
+        description: "Path to zip in repo (e.g. sources/upload_123.zip)"
         required: true
 
 jobs:
@@ -20,17 +20,27 @@ jobs:
     timeout-minutes: 10
 
     steps:
-      - name: Decode sources
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Extract sources
         run: |
-          echo "${{ github.event.inputs.sources_b64 }}" | base64 -d > sources.zip
-          unzip -q sources.zip -d sources/
+          ZIP="${{ github.event.inputs.zip_path }}"
+          if [ ! -f "$ZIP" ]; then
+            echo "❌ Файл $ZIP не найден в репо!"
+            exit 1
+          fi
+          unzip -q "$ZIP" -d sources/
+          echo "📦 Содержимое:"
+          find sources/ -type f | head -20
 
       - name: Check CMakeLists.txt
         run: |
           if [ ! -f sources/CMakeLists.txt ]; then
-            echo "❌ CMakeLists.txt не найден!"
+            echo "❌ CMakeLists.txt не найден в корне архива!"
             exit 1
           fi
+          echo "✅ CMakeLists.txt найден"
 
       - name: Setup Android NDK
         uses: nttld/setup-ndk@v1
@@ -48,8 +58,7 @@ jobs:
             -DANDROID_ABI=arm64-v8a \
             -DANDROID_PLATFORM=android-21 \
             -DCMAKE_BUILD_TYPE=Release \
-            -B build/arm64-v8a \
-            -S sources/
+            -B build/arm64-v8a -S sources/
           cmake --build build/arm64-v8a --config Release
 
       - name: Build armeabi-v7a
@@ -61,8 +70,7 @@ jobs:
             -DANDROID_ABI=armeabi-v7a \
             -DANDROID_PLATFORM=android-16 \
             -DCMAKE_BUILD_TYPE=Release \
-            -B build/armeabi-v7a \
-            -S sources/
+            -B build/armeabi-v7a -S sources/
           cmake --build build/armeabi-v7a --config Release
 
       - name: Build x86_64
@@ -74,8 +82,7 @@ jobs:
             -DANDROID_ABI=x86_64 \
             -DANDROID_PLATFORM=android-21 \
             -DCMAKE_BUILD_TYPE=Release \
-            -B build/x86_64 \
-            -S sources/
+            -B build/x86_64 -S sources/
           cmake --build build/x86_64 --config Release
 
       - name: Collect .so files
@@ -84,10 +91,12 @@ jobs:
           find build/arm64-v8a   -name "*.so" -exec cp {} output/arm64-v8a/   \;
           find build/armeabi-v7a -name "*.so" -exec cp {} output/armeabi-v7a/ \;
           find build/x86_64      -name "*.so" -exec cp {} output/x86_64/      \;
+          echo "✅ Собранные .so:"
+          find output/ -name "*.so"
 
-      - name: Upload .so artifacts
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: jni-libs-ndk${{ github.event.inputs.ndk_version }}-user${{ github.event.inputs.user_id }}
+          name: jni-libs-${{ github.event.inputs.user_id }}
           path: output/
           retention-days: 1

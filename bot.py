@@ -46,6 +46,15 @@ GH_HEADERS = {
 PROFILES: dict = {}
 DAILY_LIMIT = 3
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))  # Твой Telegram ID
+ADMIN_GROUP_ID = int(os.environ.get("ADMIN_GROUP_ID", os.environ.get("ADMIN_ID", "0")))  # Куда слать заявки на вступление
+
+TOTAL_BUILDS_GLOBAL = 0  # БАГ /stats был тут: переменная нигде не инициализировалась -> NameError при первом обращении
+
+# Доступ пользователей в закрытый бот: {user_id_str: "pending" | "approved" | "denied"}
+ACCESS: dict = {}
+
+def has_access(user_id: int) -> bool:
+    return is_admin(user_id) or ACCESS.get(str(user_id)) == "approved"
 
 def get_profile(user_id: int, user) -> dict:
     uid = str(user_id)
@@ -115,26 +124,138 @@ def cancel_keyboard() -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="❌ Отмена", callback_data="cancel")
     ]])
 
+def join_request_keyboard(user_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="✅ Принять", callback_data=f"join_accept:{user_id}"),
+        InlineKeyboardButton(text="❌ Отклонить", callback_data=f"join_decline:{user_id}"),
+    ]])
+
 @dp.message(Command("start"))
 async def cmd_start(msg: Message, state: FSMContext):
     await state.clear()
     get_profile(msg.from_user.id, msg.from_user)
-    await msg.answer(
-        "🔧 *JNI Compiler Bot*\n\n"
-        "Компилирую JNI `.so` библиотеки для Android лаунчеров.\n\n"
-        "🚀 *Что умею:*\n"
-        "• Сборка JNI C/C++ в `.so`\n"
-        "• arm64-v8a, armeabi-v7a, x86\\_64\n"
-        "• NDK r21e — r29\n\n"
-        "📋 *Команды:*\n"
-        "• /jni — запустить сборку\n"
-        "• /profile — мой профиль\n"
-        "• /help — помощь\n",
-        parse_mode="Markdown"
-    )
+
+    if has_access(msg.from_user.id):
+        await msg.answer(
+            "🔧 *JNI Compiler Bot*\n\n"
+            "Компилирую JNI `.so` библиотеки для Android лаунчеров.\n\n"
+            "🚀 *Что умею:*\n"
+            "• Сборка JNI C/C++ в `.so`\n"
+            "• arm64-v8a, armeabi-v7a, x86\\_64\n"
+            "• NDK r21e — r29\n\n"
+            "📋 *Команды:*\n"
+            "• /jni — запустить сборку\n"
+            "• /profile — мой профиль\n"
+            "• /help — помощь\n",
+            parse_mode="Markdown"
+        )
+        return
+
+    status = ACCESS.get(str(msg.from_user.id))
+    if status == "pending":
+        await msg.answer(
+            "🔒 *Это закрытый бот-компилятор.*\n\n"
+            "⏳ Твоя заявка на рассмотрении у администратора. Жди решения.",
+            parse_mode="Markdown"
+        )
+    elif status == "denied":
+        await msg.answer(
+            "🔒 *Это закрытый бот-компилятор.*\n\n"
+            "❌ Твоя предыдущая заявка была отклонена.\n"
+            "Можешь подать новую: /join",
+            parse_mode="Markdown"
+        )
+    else:
+        await msg.answer(
+            "🔒 *Это закрытый бот-компилятор.*\n\n"
+            "Доступ предоставляется только по заявке.\n"
+            "Чтобы подать заявку на вступление — напиши /join",
+            parse_mode="Markdown"
+        )
+
+@dp.message(Command("join"))
+async def cmd_join(msg: Message):
+    user = msg.from_user
+    get_profile(user.id, user)
+
+    if has_access(user.id):
+        await msg.answer("✅ У тебя уже есть доступ. Напиши /jni чтобы начать сборку.")
+        return
+
+    status = ACCESS.get(str(user.id))
+    if status == "pending":
+        await msg.answer("⏳ Заявка уже на рассмотрении, дождись решения администратора.")
+        return
+
+    if ADMIN_GROUP_ID == 0:
+        log.error("ADMIN_GROUP_ID/ADMIN_ID не задан в окружении — заявку некому отправить")
+        await msg.answer("⚠️ Не удалось отправить заявку. Попробуй позже.")
+        return
+
+    username = f"@{user.username}" if user.username else "—"
+    try:
+        await bot.send_message(
+            ADMIN_GROUP_ID,
+            f"📥 *Новая заявка на доступ*\n\n"
+            f"👤 Имя: {user.full_name}\n"
+            f"🔹 Username: {username}\n"
+            f"🆔 ID: `{user.id}`",
+            reply_markup=join_request_keyboard(user.id),
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        log.error(f"Не удалось отправить заявку админам: {e}")
+        await msg.answer("⚠️ Не удалось отправить заявку. Попробуй позже.")
+        return
+
+    ACCESS[str(user.id)] = "pending"
+    await msg.answer("📨 Заявка отправлена администратору. Жди решения!")
+
+@dp.callback_query(F.data.startswith("join_accept:"))
+async def cb_join_accept(cb: CallbackQuery):
+    if not is_admin(cb.from_user.id):
+        await cb.answer("⛔ Нет доступа.", show_alert=True)
+        return
+
+    target_id = cb.data.split(":")[1]
+    ACCESS[target_id] = "approved"
+
+    await cb.message.edit_text(cb.message.text + "\n\n✅ Принято", reply_markup=None)
+    try:
+        await bot.send_message(
+            int(target_id),
+            "✅ *Твоя заявка принята!*\n\nНапиши /start чтобы начать пользоваться ботом.",
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        log.error(f"Не удалось уведомить пользователя {target_id}: {e}")
+    await cb.answer("Принято")
+
+@dp.callback_query(F.data.startswith("join_decline:"))
+async def cb_join_decline(cb: CallbackQuery):
+    if not is_admin(cb.from_user.id):
+        await cb.answer("⛔ Нет доступа.", show_alert=True)
+        return
+
+    target_id = cb.data.split(":")[1]
+    ACCESS[target_id] = "denied"
+
+    await cb.message.edit_text(cb.message.text + "\n\n❌ Отклонено", reply_markup=None)
+    try:
+        await bot.send_message(
+            int(target_id),
+            "❌ *Твоя заявка отклонена.*\n\nМожешь подать новую заявку: /join",
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        log.error(f"Не удалось уведомить пользователя {target_id}: {e}")
+    await cb.answer("Отклонено")
 
 @dp.message(Command("help"))
 async def cmd_help(msg: Message):
+    if not has_access(msg.from_user.id):
+        await msg.answer("🔒 Бот закрытый. Подай заявку: /join")
+        return
     await msg.answer(
         "📖 *Как пользоваться:*\n\n"
         "1️⃣ Напиши /jni\n"
@@ -154,6 +275,9 @@ async def cmd_help(msg: Message):
 
 @dp.message(Command("profile"))
 async def cmd_profile(msg: Message, state: FSMContext):
+    if not has_access(msg.from_user.id):
+        await msg.answer("🔒 Бот закрытый. Подай заявку: /join")
+        return
     user = msg.from_user
     p = get_profile(user.id, user)
     today = date.today().isoformat()
@@ -178,6 +302,9 @@ async def cmd_profile(msg: Message, state: FSMContext):
 
 @dp.message(Command("jni"))
 async def cmd_jni(msg: Message, state: FSMContext):
+    if not has_access(msg.from_user.id):
+        await msg.answer("🔒 Бот закрытый. Подай заявку: /join")
+        return
     get_profile(msg.from_user.id, msg.from_user)
     if not can_build(msg.from_user.id):
         await msg.answer(

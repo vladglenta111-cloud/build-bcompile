@@ -19,7 +19,8 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.types import (
     Message, CallbackQuery,
     InlineKeyboardMarkup, InlineKeyboardButton,
-    FSInputFile
+    FSInputFile, BotCommand,
+    BotCommandScopeDefault, BotCommandScopeChat
 )
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
@@ -71,7 +72,8 @@ def has_access(user_id: int) -> bool:
 def get_profile(user_id: int, user) -> dict:
     uid = str(user_id)
     today = date.today().isoformat()
-    if uid not in PROFILES:
+    is_new = uid not in PROFILES
+    if is_new:
         PROFILES[uid] = {
             "name": user.full_name,
             "username": user.username or "",
@@ -80,6 +82,8 @@ def get_profile(user_id: int, user) -> dict:
             "today_builds": 0,
             "last_build_date": today,
         }
+        # Новый пользователь — сразу сохраняем, чтобы профиль не потерялся при перезапуске
+        asyncio.create_task(save_persisted_data())
     else:
         # Сбрасываем дневной счётчик если новый день
         if PROFILES[uid]["last_build_date"] != today:
@@ -105,6 +109,73 @@ def increment_builds(user_id: int):
     PROFILES[uid]["total_builds"] += 1
     PROFILES[uid]["today_builds"] += 1
     TOTAL_BUILDS_GLOBAL += 1
+    asyncio.create_task(save_persisted_data())
+
+# ─── Постоянное хранилище (профили/доступы переживают перезапуск бота) ───────
+DATA_GH_PATH = os.environ.get("DATA_GH_PATH", "data/bot_data.json")
+_data_save_lock = asyncio.Lock()
+
+async def load_persisted_data():
+    """Загружает PROFILES/ACCESS/TOTAL_BUILDS_GLOBAL из репозитория при старте бота"""
+    global TOTAL_BUILDS_GLOBAL
+    url = f"{GH_API}/repos/{GH_REPO}/contents/{DATA_GH_PATH}"
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, headers=GH_HEADERS) as resp:
+            if resp.status != 200:
+                log.info("Файл с сохранёнными данными не найден в репозитории — старт с пустой базой")
+                return
+            data = await resp.json()
+
+    try:
+        raw = base64.b64decode(data.get("content", "")).decode("utf-8")
+        payload = json.loads(raw)
+    except Exception as e:
+        log.error(f"Не удалось разобрать сохранённые данные: {e}")
+        return
+
+    PROFILES.clear()
+    PROFILES.update(payload.get("profiles", {}))
+    ACCESS.clear()
+    ACCESS.update(payload.get("access", {}))
+    TOTAL_BUILDS_GLOBAL = payload.get("total_builds", 0)
+    log.info(
+        f"Загружено из репозитория: профилей {len(PROFILES)}, "
+        f"доступов {len(ACCESS)}, всего сборок {TOTAL_BUILDS_GLOBAL}"
+    )
+
+async def save_persisted_data():
+    """Сохраняет текущее состояние PROFILES/ACCESS/TOTAL_BUILDS_GLOBAL обратно в репозиторий"""
+    payload = {
+        "profiles": PROFILES,
+        "access": ACCESS,
+        "total_builds": TOTAL_BUILDS_GLOBAL,
+    }
+    content = base64.b64encode(
+        json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
+    ).decode()
+
+    url = f"{GH_API}/repos/{GH_REPO}/contents/{DATA_GH_PATH}"
+    async with _data_save_lock:
+        async with aiohttp.ClientSession() as session:
+            sha = None
+            async with session.get(url, headers=GH_HEADERS) as resp:
+                if resp.status == 200:
+                    existing = await resp.json()
+                    sha = existing.get("sha")
+
+            body = {
+                "message": "Автосохранение данных бота (профили/доступы)",
+                "content": content,
+            }
+            if sha:
+                body["sha"] = sha
+
+            async with session.put(url, headers=GH_HEADERS, json=body) as resp:
+                if resp.status not in (200, 201):
+                    log.error(
+                        f"Не удалось сохранить данные в репозиторий: "
+                        f"{resp.status} {await resp.text()}"
+                    )
 
 NDK_VERSIONS = [
     "r21e", "r22b", "r23c",
@@ -221,6 +292,7 @@ async def cmd_join(msg: Message):
         return
 
     ACCESS[str(user.id)] = "pending"
+    await save_persisted_data()
     await msg.answer("📨 Заявка отправлена администратору. Жди решения!")
 
 @dp.callback_query(F.data.startswith("join_accept:"))
@@ -231,6 +303,7 @@ async def cb_join_accept(cb: CallbackQuery):
 
     target_id = cb.data.split(":")[1]
     ACCESS[target_id] = "approved"
+    await save_persisted_data()
 
     await cb.message.edit_text(cb.message.text + "\n\n✅ Принято", reply_markup=None)
     try:
@@ -251,6 +324,7 @@ async def cb_join_decline(cb: CallbackQuery):
 
     target_id = cb.data.split(":")[1]
     ACCESS[target_id] = "denied"
+    await save_persisted_data()
 
     await cb.message.edit_text(cb.message.text + "\n\n❌ Отклонено", reply_markup=None)
     try:
@@ -709,6 +783,7 @@ async def cmd_limit(msg: Message):
     # Уменьшаем today_builds чтобы добавить лимит
     PROFILES[found_uid]["today_builds"] = max(0, PROFILES[found_uid]["today_builds"] - add_count)
     remaining = DAILY_LIMIT - PROFILES[found_uid]["today_builds"]
+    await save_persisted_data()
 
     await msg.answer(
         f"✅ Добавлено *{add_count}* компиляций для @{target_username}\n"
@@ -786,8 +861,85 @@ async def cmd_tab(msg: Message):
     else:
         await msg.answer(text, parse_mode="Markdown")
 
+# ─── /spam ────────────────────────────────────────────────────────────────────
+@dp.message(Command("spam"))
+async def cmd_spam(msg: Message):
+    if not is_admin(msg.from_user.id):
+        await msg.answer("⛔ Нет доступа.")
+        return
+
+    parts = msg.text.split(maxsplit=1)
+    raw_text = parts[1] if len(parts) > 1 else None
+
+    if not raw_text and not msg.reply_to_message:
+        await msg.answer(
+            "❌ *Использование:*\n"
+            "• `/spam Текст сообщения` — разослать текст\n"
+            "• Ответь (reply) на сообщение и напиши `/spam` — разойдётся как есть, "
+            "включая фото/файлы",
+            parse_mode="Markdown"
+        )
+        return
+
+    user_ids = list(PROFILES.keys())
+    if not user_ids:
+        await msg.answer("📭 Пока нет пользователей для рассылки.")
+        return
+
+    status_msg = await msg.answer(f"📤 Рассылка для {len(user_ids)} пользователей...")
+
+    sent = 0
+    failed = 0
+    for uid in user_ids:
+        try:
+            if msg.reply_to_message:
+                await bot.copy_message(
+                    chat_id=int(uid),
+                    from_chat_id=msg.chat.id,
+                    message_id=msg.reply_to_message.message_id
+                )
+            else:
+                await bot.send_message(int(uid), raw_text)
+            sent += 1
+        except Exception as e:
+            failed += 1
+            log.warning(f"Не удалось отправить рассылку пользователю {uid}: {e}")
+        await asyncio.sleep(0.05)  # не превышаем лимиты Telegram на отправку
+
+    await status_msg.edit_text(
+        f"✅ *Рассылка завершена!*\n"
+        f"📨 Доставлено: {sent}\n"
+        f"❌ Не доставлено: {failed}",
+        parse_mode="Markdown"
+    )
+
+async def set_bot_commands():
+    """Настраивает меню команд бота (кнопка «Меню» рядом с полем ввода)"""
+    default_commands = [
+        BotCommand(command="start", description="🚀 Запуск бота"),
+        BotCommand(command="help", description="📖 Как пользоваться"),
+        BotCommand(command="profile", description="👤 Мой профиль"),
+        BotCommand(command="jni", description="🔧 Компиляция JNI"),
+        BotCommand(command="join", description="📝 Подать заявку"),
+    ]
+    await bot.set_my_commands(default_commands, scope=BotCommandScopeDefault())
+
+    if ADMIN_ID:
+        admin_commands = default_commands + [
+            BotCommand(command="stats", description="📊 Статистика бота"),
+            BotCommand(command="tab", description="👥 Список пользователей"),
+            BotCommand(command="limit", description="⚙️ Изменить лимит юзера"),
+            BotCommand(command="spam", description="📢 Рассылка всем"),
+        ]
+        try:
+            await bot.set_my_commands(admin_commands, scope=BotCommandScopeChat(chat_id=ADMIN_ID))
+        except Exception as e:
+            log.error(f"Не удалось установить меню команд для админа: {e}")
+
 async def main():
     log.info("Starting JNI Compiler Bot...")
+    await load_persisted_data()
+    await set_bot_commands()
     await dp.start_polling(bot)
 
 if __name__ == "__main__":

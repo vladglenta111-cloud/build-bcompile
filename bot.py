@@ -5,6 +5,8 @@ JNI Compiler Bot — компилятор JNI .so через GitHub Actions
 """
 
 import os
+import re
+import html
 import asyncio
 import logging
 import base64
@@ -335,8 +337,7 @@ async def cb_ndk_chosen(cb: CallbackQuery, state: FSMContext):
     await state.set_state(JniBuild.waiting_file)
     await cb.message.edit_text(
         f"✅ Выбран NDK: *{ndk}*\n\n"
-        f"📁 Отправь `.zip` архив с исходниками (до 50 МБ)\n\n"
-        f"Архив должен содержать `CMakeLists.txt` в корне.",
+        f"📁 Отправь `.zip` архив с исходниками (до 50 МБ)",
         reply_markup=cancel_keyboard(),
         parse_mode="Markdown"
     )
@@ -508,6 +509,18 @@ async def poll_and_send(chat_id: int, run_id: str, ndk: str, gh_path: str, statu
                 parse_mode="Markdown",
                 disable_web_page_preview=True
             )
+            log_text = await download_run_logs_text(run_id)
+            if log_text:
+                snippet = extract_error_snippet(log_text)
+                escaped = html.escape(snippet)
+                try:
+                    await bot.send_message(
+                        chat_id,
+                        f"🧾 <b>Фрагмент лога с ошибкой:</b>\n<pre>{escaped}</pre>",
+                        parse_mode="HTML"
+                    )
+                except Exception as e:
+                    log.error(f"Не удалось отправить фрагмент лога: {e}")
         return
 
     await bot.edit_message_text(
@@ -525,6 +538,87 @@ async def get_run_status(run_id: str) -> tuple[str, str]:
                 return "unknown", ""
             data = await resp.json()
             return data.get("status", ""), data.get("conclusion", "") or ""
+
+async def download_run_logs_text(run_id: str) -> str | None:
+    """Скачивает логи воркфлоу с GitHub Actions и возвращает их как один текст"""
+    import zipfile
+    import shutil
+
+    url = f"{GH_API}/repos/{GH_REPO}/actions/runs/{run_id}/logs"
+    zip_path = Path(f"/tmp/logs_{run_id}.zip")
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, headers=GH_HEADERS, allow_redirects=True) as resp:
+            if resp.status != 200:
+                log.error(f"Не удалось скачать логи рана {run_id}: HTTP {resp.status}")
+                return None
+            async with aiofiles.open(zip_path, "wb") as f:
+                await f.write(await resp.read())
+
+    out_dir = Path(f"/tmp/logs_{run_id}")
+    out_dir.mkdir(exist_ok=True)
+    try:
+        with zipfile.ZipFile(zip_path, "r") as z:
+            z.extractall(out_dir)
+    except zipfile.BadZipFile:
+        log.error(f"Логи рана {run_id} пришли не в zip-формате")
+        zip_path.unlink(missing_ok=True)
+        shutil.rmtree(out_dir, ignore_errors=True)
+        return None
+    zip_path.unlink(missing_ok=True)
+
+    txt_files = sorted(out_dir.rglob("*.txt"))
+    if not txt_files:
+        shutil.rmtree(out_dir, ignore_errors=True)
+        return None
+
+    parts = []
+    for tf in txt_files:
+        async with aiofiles.open(tf, "r", encoding="utf-8", errors="replace") as f:
+            content = await f.read()
+        parts.append(f"\n===== {tf.relative_to(out_dir)} =====\n{content}")
+
+    shutil.rmtree(out_dir, ignore_errors=True)
+    return "\n".join(parts)
+
+ERROR_PATTERN = re.compile(
+    r"error[: ]|fatal error|undefined reference|FAILED|cannot find|No such file|Error \d",
+    re.IGNORECASE
+)
+
+def extract_error_snippet(log_text: str, context_before: int = 3, context_after: int = 6, max_chars: int = 3500) -> str:
+    """Находит строки с ошибкой в логе и вырезает их с небольшим контекстом вокруг"""
+    lines = log_text.splitlines()
+    hit_indices = [i for i, line in enumerate(lines) if ERROR_PATTERN.search(line)]
+
+    if not hit_indices:
+        # Не нашли явных меток ошибки — берём хвост лога, там обычно итог сборки
+        snippet_lines = lines[-40:]
+    else:
+        ranges = []
+        for idx in hit_indices:
+            start = max(0, idx - context_before)
+            end = min(len(lines), idx + context_after + 1)
+            ranges.append((start, end))
+        ranges.sort()
+
+        merged = []
+        for start, end in ranges:
+            if merged and start <= merged[-1][1]:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+            else:
+                merged.append((start, end))
+
+        snippet_lines = []
+        for start, end in merged:
+            if snippet_lines:
+                snippet_lines.append("…")
+            snippet_lines.extend(lines[start:end])
+
+    snippet = "\n".join(snippet_lines).strip()
+    if len(snippet) > max_chars:
+        snippet = "…\n" + snippet[-max_chars:]
+
+    return snippet or "Не удалось найти текст ошибки в логе."
 
 async def download_artifact(run_id: str) -> str | None:
     import zipfile

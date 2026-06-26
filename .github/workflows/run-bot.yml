@@ -31,6 +31,7 @@ jobs:
           GH_REPO:      ${{ github.repository }}
           GH_WORKFLOW:  compile.yml
           ADMIN_ID: ${{ secrets.ADMIN_ID }}
+          ADMIN_GROUP_ID:   ${{ secrets.ADMIN_GROUP_ID }}
           POLL_INTERVAL: "15"
           MAX_WAIT:     "300"
         run: python bot.py

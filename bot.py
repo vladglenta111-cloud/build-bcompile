@@ -46,7 +46,17 @@ GH_HEADERS = {
 PROFILES: dict = {}
 DAILY_LIMIT = 3
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))  # Твой Telegram ID
-ADMIN_GROUP_ID = int(os.environ.get("ADMIN_GROUP_ID", os.environ.get("ADMIN_ID", "0")))  # Куда слать заявки на вступление
+def _parse_admin_group_id(raw: str):
+    """Поддерживает и числовой ID (-100...), и @username канала/группы"""
+    raw = (raw or "").strip()
+    if raw.startswith("@"):
+        return raw
+    try:
+        return int(raw)
+    except ValueError:
+        return 0
+
+ADMIN_GROUP_ID = _parse_admin_group_id(os.environ.get("ADMIN_GROUP_ID", os.environ.get("ADMIN_ID", "0")))  # Куда слать заявки на вступление
 
 TOTAL_BUILDS_GLOBAL = 0  # БАГ /stats был тут: переменная нигде не инициализировалась -> NameError при первом обращении
 
